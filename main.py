@@ -1,9 +1,9 @@
 """
-Discord Translator/Mirroring Bot — Self‑Hosted "Premium for me"
+Discord Translator/Mirroring Bot — Self-Hosted "Premium for me"
 
 Features:
 - Channel mirroring with translation (bridge many-to-many)
-- Slash commands: /bridge add|remove|list, /premium grant|revoke|status, /lang detect|list
+- Slash commands: /bridge add|remove|list, /premium grant|revoke|status, /lang list
 - Premium gating: unlimited bridges & autotranslate for owner guild/user only; others limited
 - Optional autotranslate mode for a channel
 - Supports multiple translation backends via adapters (DeepL, Google Cloud, Offline MarianMT demo)
@@ -13,7 +13,7 @@ Features:
 IMPORTANT: Fill in environment variables before running (see bottom of file).
 Python 3.10+
 """
-
+import io
 import os
 import asyncio
 import logging
@@ -21,18 +21,14 @@ from dataclasses import dataclass
 from typing import List, Optional, Dict, Tuple
 
 import discord
-from discord import app_commands
+from discord import app_commands, AllowedMentions
 from discord.ext import commands
 
 from dotenv import load_dotenv
 load_dotenv()
 
-
 # Storage
 import aiosqlite
-
-# Optional: Google Cloud / DeepL adapters
-# These imports are optional; the adapters handle ImportError gracefully
 
 # -------------- Logging --------------
 logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(name)s: %(message)s")
@@ -65,15 +61,22 @@ class DeepLAdapter(TranslatorAdapter):
             raise RuntimeError("Install httpx for DeepL adapter: pip install httpx")
         self.httpx = __import__("httpx")
         self.api_key = api_key
-        self.endpoint = "https://api-free.deepl.com/v2/translate" if api_key and api_key.startswith("free:") else "https://api.deepl.com/v2/translate"
+        self.endpoint = (
+            "https://api-free.deepl.com/v2/translate"
+            if api_key and api_key.startswith("free:")
+            else "https://api.deepl.com/v2/translate"
+        )
 
     async def translate(self, text: str, target_lang: str) -> str:
         async with self.httpx.AsyncClient(timeout=20) as client:
-            r = await client.post(self.endpoint, data={
-                "auth_key": self.api_key.replace("free:", ""),
-                "text": text,
-                "target_lang": target_lang.upper(),
-            })
+            r = await client.post(
+                self.endpoint,
+                data={
+                    "auth_key": self.api_key.replace("free:", ""),
+                    "text": text,
+                    "target_lang": target_lang.upper(),
+                },
+            )
             r.raise_for_status()
             data = r.json()
             return data["translations"][0]["text"]
@@ -95,13 +98,12 @@ class GoogleAdapter(TranslatorAdapter):
                 contents=[text], target_language_code=target_lang, parent=self.parent
             )
             return resp.translations[0].translated_text
+
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, _call)
 
 class OfflineAdapter(TranslatorAdapter):
-    """Demo offline adapter using HuggingFace Transformers MarianMT for a few pairs.
-    This is for testing only; real multi-language coverage needs a proper model per pair.
-    """
+    """Demo offline adapter using HuggingFace Transformers MarianMT for a few pairs."""
     _cache: Dict[str, object] = {}
 
     def __init__(self):
@@ -118,7 +120,6 @@ class OfflineAdapter(TranslatorAdapter):
         key = f"{src}->{tgt}"
         if key in self._cache:
             return self._cache[key]
-        # Simple heuristic mapping—extend as needed
         pair2model = {
             "es->en": "Helsinki-NLP/opus-mt-es-en",
             "en->es": "Helsinki-NLP/opus-mt-en-es",
@@ -134,14 +135,15 @@ class OfflineAdapter(TranslatorAdapter):
         return tok, model
 
     async def translate(self, text: str, target_lang: str) -> str:
-        # naive assume src is en if target isn't en
         src = "en" if target_lang != "en" else "es"  # crude; replace with detector if needed
         tok, model = self._get_pipeline(src, target_lang)
         loop = asyncio.get_running_loop()
+
         def _run():
             batch = tok([text], return_tensors="pt", padding=True)
             gen = model.generate(**batch, max_new_tokens=400)
             return tok.decode(gen[0], skip_special_tokens=True)
+
         return await loop.run_in_executor(None, _run)
 
 # -------------- Database --------------
@@ -181,7 +183,7 @@ class Store:
         assert self._conn
         await self._conn.execute(
             "INSERT OR IGNORE INTO bridges (guild_id, src_channel_id, dst_channel_id, target_lang) VALUES (?,?,?,?)",
-            (guild_id, src, dst, lang)
+            (guild_id, src, dst, lang),
         )
         await self._conn.commit()
 
@@ -189,15 +191,15 @@ class Store:
         assert self._conn
         await self._conn.execute(
             "DELETE FROM bridges WHERE guild_id=? AND src_channel_id=? AND dst_channel_id=?",
-            (guild_id, src, dst)
+            (guild_id, src, dst),
         )
         await self._conn.commit()
 
-    async def list_bridges(self, guild_id: int) -> List[Tuple[int,int,str]]:
+    async def list_bridges(self, guild_id: int) -> List[Tuple[int, int, str]]:
         assert self._conn
         cur = await self._conn.execute(
             "SELECT src_channel_id, dst_channel_id, target_lang FROM bridges WHERE guild_id=?",
-            (guild_id,)
+            (guild_id,),
         )
         rows = await cur.fetchall()
         return [(r[0], r[1], r[2]) for r in rows]
@@ -206,7 +208,7 @@ class Store:
         assert self._conn
         cur = await self._conn.execute(
             "SELECT COUNT(*) FROM bridges WHERE guild_id=?",
-            (guild_id,)
+            (guild_id,),
         )
         (n,) = await cur.fetchone()
         return int(n)
@@ -215,7 +217,7 @@ class Store:
         assert self._conn
         await self._conn.execute(
             "INSERT OR REPLACE INTO autotranslate_channels (guild_id, channel_id, target_lang) VALUES (?,?,?)",
-            (guild_id, channel_id, lang)
+            (guild_id, channel_id, lang),
         )
         await self._conn.commit()
 
@@ -223,7 +225,7 @@ class Store:
         assert self._conn
         await self._conn.execute(
             "DELETE FROM autotranslate_channels WHERE guild_id=? AND channel_id=?",
-            (guild_id, channel_id)
+            (guild_id, channel_id),
         )
         await self._conn.commit()
 
@@ -231,24 +233,30 @@ class Store:
         assert self._conn
         cur = await self._conn.execute(
             "SELECT channel_id, target_lang FROM autotranslate_channels WHERE guild_id=?",
-            (guild_id,)
+            (guild_id,),
         )
         rows = await cur.fetchall()
         return {int(r[0]): r[1] for r in rows}
 
     async def grant_premium(self, guild_id: int):
         assert self._conn
-        await self._conn.execute("INSERT OR IGNORE INTO premium_guilds (guild_id) VALUES (?)", (guild_id,))
+        await self._conn.execute(
+            "INSERT OR IGNORE INTO premium_guilds (guild_id) VALUES (?)", (guild_id,)
+        )
         await self._conn.commit()
 
     async def revoke_premium(self, guild_id: int):
         assert self._conn
-        await self._conn.execute("DELETE FROM premium_guilds WHERE guild_id=?", (guild_id,))
+        await self._conn.execute(
+            "DELETE FROM premium_guilds WHERE guild_id=?", (guild_id,)
+        )
         await self._conn.commit()
 
     async def is_premium(self, guild_id: int) -> bool:
         assert self._conn
-        cur = await self._conn.execute("SELECT 1 FROM premium_guilds WHERE guild_id=?", (guild_id,))
+        cur = await self._conn.execute(
+            "SELECT 1 FROM premium_guilds WHERE guild_id=?", (guild_id,)
+        )
         row = await cur.fetchone()
         return row is not None
 
@@ -265,7 +273,9 @@ class TranslatorCog(commands.Cog):
         self.store = store
         self.adapter = adapter
         self.autotranslate_cache: Dict[int, Dict[int, str]] = {}  # guild_id -> {channel_id: lang}
-        self.BOT_TAG = "[mirror]"  # used to avoid loops
+        self.BOT_TAG = "[mirror]"  # not used in webhook mode, but kept for compatibility
+        # NEW: cache a webhook per destination channel
+        self._webhook_cache: Dict[int, discord.Webhook] = {}
 
     async def refresh_autotranslate(self, guild_id: int):
         self.autotranslate_cache[guild_id] = await self.store.get_autotranslate(guild_id)
@@ -278,6 +288,30 @@ class TranslatorCog(commands.Cog):
 
     def _sanitize(self, content: str) -> str:
         return content.strip()
+
+    async def _get_or_create_webhook(self, channel: discord.TextChannel) -> discord.Webhook:
+        """Return a reusable webhook for a channel (creates one if missing)."""
+        wh = self._webhook_cache.get(channel.id)
+        if wh:
+            try:
+                await wh.fetch()  # ensure it's still valid
+                return wh
+            except Exception:
+                self._webhook_cache.pop(channel.id, None)
+
+        # Try to reuse an existing one we created earlier
+        try:
+            for existing in await channel.webhooks():
+                if existing.name == "MirrorBridge":
+                    self._webhook_cache[channel.id] = existing
+                    return existing
+        except Exception:
+            pass
+
+        # Create a new one (requires Manage Webhooks)
+        new_wh = await channel.create_webhook(name="MirrorBridge")
+        self._webhook_cache[channel.id] = new_wh
+        return new_wh
 
     # ---------- Events ----------
     @commands.Cog.listener()
@@ -292,16 +326,15 @@ class TranslatorCog(commands.Cog):
         except Exception as e:
             log.exception("Slash sync failed: %s", e)
 
-    @commands.Cog.listener()
+    @commands.Cog.listener())
     async def on_guild_join(self, guild: discord.Guild):
         await self.refresh_autotranslate(guild.id)
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
-        if message.author.bot:
+        # Prevent loops & ignore bots/webhook posts
+        if message.author.bot or (message.webhook_id is not None):
             return
-        if self.BOT_TAG in message.content:
-            return  # ignore own mirrors
 
         guild = message.guild
         if not guild:
@@ -329,21 +362,49 @@ class TranslatorCog(commands.Cog):
             log.warning("Translate failed: %s", e)
             return
 
-        content = f"{self.BOT_TAG} from #{message.channel.name} by **{message.author.display_name}**\n{translated}"
-        files = []
+        # Send THROUGH WEBHOOK as the original author (name + avatar)
         try:
+            wh = await self._get_or_create_webhook(dst)
+
+            author_name = message.author.display_name
+            author_avatar = (
+                message.author.display_avatar.url
+                if getattr(message.author, "display_avatar", None)
+                else None
+            )
+
+            files = []
             if message.attachments:
                 for a in message.attachments:
-                    fbytes = await a.read()
-                    files.append(discord.File(fp=bytes(fbytes), filename=a.filename))
-            await dst.send(content, files=files if files else None, allowed_mentions=discord.AllowedMentions.none())
+                    try:
+                        blob = await a.read()
+                        files.append(discord.File(io.BytesIO(blob), filename=a.filename))
+                    except Exception:
+                        pass
+
+            await wh.send(
+                content=(translated or None),
+                username=author_name,
+                avatar_url=author_avatar,
+                files=(files or None),
+                allowed_mentions=AllowedMentions.none(),
+            )
+        except discord.Forbidden:
+            # Fallback to normal send if we lack Manage Webhooks
+            try:
+                await dst.send(
+                    translated,
+                    allowed_mentions=AllowedMentions.none(),
+                )
+            except Exception as e:
+                log.warning("Mirror send fallback failed: %s", e)
         except Exception as e:
-            log.warning("Mirror send failed: %s", e)
+            log.warning("Webhook send failed: %s", e)
 
     async def _translate_inline(self, message: discord.Message, target_lang: str):
         try:
             translated = await self.adapter.translate(self._sanitize(message.content), target_lang)
-            await message.reply(f"{self.BOT_TAG} → `{target_lang}`\n{translated}", mention_author=False)
+            await message.reply(f"`{target_lang}`\n{translated}", mention_author=False)
         except Exception as e:
             log.warning("Inline translate failed: %s", e)
 
@@ -359,7 +420,8 @@ class TranslatorCog(commands.Cog):
             count = await self.store.bridge_count(guild.id)
             if count >= MAX_BRIDGES_FREE:
                 await interaction.response.send_message(
-                    f"This server reached the free limit of {MAX_BRIDGES_FREE} bridges. Ask the owner to grant premium.", ephemeral=True
+                    f"This server reached the free limit of {MAX_BRIDGES_FREE} bridges. Ask the owner to grant premium.",
+                    ephemeral=True,
                 )
                 return
         await self.store.add_bridge(guild.id, interaction.channel_id, destination_channel.id, target_language)
@@ -463,11 +525,7 @@ async def main():
 
     bot = commands.Bot(command_prefix="!", intents=INTENTS)
     cog = TranslatorCog(bot, store, adapter)
-
-# Add the cog (await is required in your discord.py)
     await bot.add_cog(cog)
-
-# Do NOT add slash commands manually; the Cog handles that.
     await bot.start(BOT_TOKEN)
 
 if __name__ == "__main__":
@@ -483,7 +541,9 @@ if __name__ == "__main__":
        export DEEPL_API_KEY=free:xxxxx  # if using DeepL free
     3) python main.py
 
-    Permissions: give the bot Read/Send Messages, Read Message History, Attach Files.
+    Permissions needed in destination channels:
+      View Channels, Read Message History, Attach Files, Embed Links,
+      Use Slash Commands, **Manage Webhooks** (for author-style mirroring)
 
     Usage examples:
       /bridge_add destination_channel:#spanish target_language:es
@@ -493,4 +553,3 @@ if __name__ == "__main__":
       /premium_grant (owner only)
     """
     asyncio.run(main())
-

@@ -1,0 +1,7 @@
+.env
+translator.db
+translator.db-shm
+translator.db-wal
+__pycache__/
+*.log
+.DS_Store

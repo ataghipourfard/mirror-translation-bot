@@ -326,7 +326,7 @@ class TranslatorCog(commands.Cog):
         except Exception as e:
             log.exception("Slash sync failed: %s", e)
 
-    @commands.Cog.listener())
+    @commands.Cog.listener()
     async def on_guild_join(self, guild: discord.Guild):
         await self.refresh_autotranslate(guild.id)
 
